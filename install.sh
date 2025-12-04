@@ -13,22 +13,24 @@ NC='\033[0m' # No Color
 NAMESPACE="demo-app"
 API_IMAGE_NAME="k8s-api-demo:latest"
 INGRESS_HOST="api.local"
+ENV_FILE=".env"
+DOCKER_SECRET_NAME="docker-registry-secret"
 
 # Function to print colored messages
 print_info() {
-    echo -e "${BLUE}ℹ️  $1${NC}"
+    echo -e "${BLUE}[INFO] $1${NC}"
 }
 
 print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
+    echo -e "${GREEN}[SUCCESS] $1${NC}"
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠️  $1${NC}"
+    echo -e "${YELLOW}[WARNING] $1${NC}"
 }
 
 print_error() {
-    echo -e "${RED}❌ $1${NC}"
+    echo -e "${RED}[ERROR] $1${NC}"
 }
 
 print_header() {
@@ -59,63 +61,99 @@ check_cluster() {
     kubectl cluster-info | head -1
 }
 
-# Check if nerdctl is available (Rancher Desktop uses nerdctl)
-check_container_runtime() {
-    print_info "Checking container runtime..."
+# Verify API image exists
+verify_api_image() {
+    print_info "Verifying API Docker image exists..."
     
+    # Check with nerdctl first (Rancher Desktop)
     if command -v nerdctl &> /dev/null; then
-        CONTAINER_CMD="nerdctl"
-        print_success "Using nerdctl (Rancher Desktop)"
-    elif command -v docker &> /dev/null; then
-        CONTAINER_CMD="docker"
-        print_success "Using docker"
-    else
-        print_error "Neither nerdctl nor docker is available"
-        exit 1
-    fi
-}
-
-# Build the API Docker image
-build_api_image() {
-    print_info "Building API Docker image..."
-    cd api
-    
-    # For Rancher Desktop, use the k8s.io namespace
-    if [ "$CONTAINER_CMD" = "nerdctl" ]; then
-        nerdctl -n k8s.io build -t "$API_IMAGE_NAME" .
-    else
-        docker build -t "$API_IMAGE_NAME" .
+        if nerdctl -n k8s.io images | grep -q "$API_IMAGE_NAME"; then
+            print_success "API image found (nerdctl)"
+            return 0
+        fi
     fi
     
-    cd ..
-    print_success "API image built successfully"
+    # Check with docker
+    if command -v docker &> /dev/null; then
+        if docker images | grep -q "k8s-api-demo"; then
+            print_success "API image found (docker)"
+            return 0
+        fi
+    fi
+    
+    print_warning "API image '$API_IMAGE_NAME' not found locally"
+    print_info "Assuming image will be pulled or is available in the cluster"
 }
 
-# Install NGINX Ingress Controller if not present
-install_nginx_ingress() {
-    print_info "Checking NGINX Ingress Controller..."
+# Verify NGINX Ingress Controller exists
+verify_nginx_ingress() {
+    print_info "Verifying NGINX Ingress Controller..."
     
     if kubectl get namespace ingress-nginx &> /dev/null; then
-        print_warning "NGINX Ingress already installed"
+        if kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller &> /dev/null; then
+            print_success "NGINX Ingress Controller is present"
+        else
+            print_warning "NGINX Ingress namespace exists but controller not found"
+        fi
     else
-        print_info "Installing NGINX Ingress Controller..."
-        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.5/deploy/static/provider/cloud/deploy.yaml
-        
-        print_info "Waiting for NGINX Ingress Controller to be ready..."
-        kubectl wait --namespace ingress-nginx \
-            --for=condition=ready pod \
-            --selector=app.kubernetes.io/component=controller \
-            --timeout=120s
-        
-        print_success "NGINX Ingress Controller installed"
+        print_warning "NGINX Ingress Controller not found - please install it manually"
+        print_info "Run: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.5/deploy/static/provider/cloud/deploy.yaml"
     fi
 }
 
-# Create namespace
-create_namespace() {
-    print_info "Creating namespace..."
-    kubectl apply -f k8s/namespace.yaml
-    print_success "Namespace created/verified"
+# Verify namespace exists
+verify_namespace() {
+    print_info "Verifying namespace exists..."
+    if kubectl get namespace "$NAMESPACE" &> /dev/null; then
+        print_success "Namespace '$NAMESPACE' exists"
+    else
+        print_warning "Namespace '$NAMESPACE' not found, creating it..."
+        kubectl apply -f k8s/namespace.yaml
+        print_success "Namespace created"
+    fi
+}
+
+# Create Docker registry secret from .env file
+create_docker_secret() {
+    print_info "Creating Docker registry secret..."
+    
+    # Check if .env file exists
+    if [ ! -f "$ENV_FILE" ]; then
+        print_warning ".env file not found - skipping Docker registry secret creation"
+        print_info "If you need to pull images from a private registry, create a .env file with:"
+        print_info "  DOCKER_REGISTRY_SERVER=https://index.docker.io/v1/"
+        print_info "  DOCKER_USERNAME=your-username"
+        print_info "  DOCKER_PASSWORD=your-password"
+        print_info "  DOCKER_EMAIL=your-email@example.com"
+        return 0
+    fi
+    
+    # Source the .env file
+    source "$ENV_FILE"
+    
+    # Validate required variables
+    if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PASSWORD" ]; then
+        print_warning "DOCKER_USERNAME or DOCKER_PASSWORD not set in .env file"
+        print_info "Skipping Docker registry secret creation"
+        return 0
+    fi
+    
+    # Set defaults if not provided
+    DOCKER_REGISTRY_SERVER=${DOCKER_REGISTRY_SERVER:-"https://index.docker.io/v1/"}
+    DOCKER_EMAIL=${DOCKER_EMAIL:-"noreply@example.com"}
+    
+    # Delete existing secret if it exists
+    kubectl delete secret "$DOCKER_SECRET_NAME" -n "$NAMESPACE" --ignore-not-found=true
+    
+    # Create the secret
+    kubectl create secret docker-registry "$DOCKER_SECRET_NAME" \
+        --docker-server="$DOCKER_REGISTRY_SERVER" \
+        --docker-username="$DOCKER_USERNAME" \
+        --docker-password="$DOCKER_PASSWORD" \
+        --docker-email="$DOCKER_EMAIL" \
+        -n "$NAMESPACE"
+    
+    print_success "Docker registry secret created"
 }
 
 # Deploy MongoDB
@@ -225,12 +263,12 @@ main() {
     # Preflight checks
     check_kubectl
     check_cluster
-    check_container_runtime
+    verify_api_image
+    verify_nginx_ingress
     
-    # Build and deploy
-    build_api_image
-    install_nginx_ingress
-    create_namespace
+    # Deploy
+    verify_namespace
+    create_docker_secret
     deploy_mongodb
     deploy_api
     deploy_ingress
