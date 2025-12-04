@@ -208,26 +208,29 @@ configure_hosts() {
 get_access_info() {
     print_header "Deployment Complete!"
     
-    # Get Ingress port
-    INGRESS_PORT=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}')
-    
-    if [ -z "$INGRESS_PORT" ]; then
-        # If NodePort is not available, try LoadBalancer port
-        INGRESS_PORT=80
-    fi
-    
     print_success "Application is ready!"
     echo ""
+    
     print_info "Access URLs:"
-    echo -e "  ${GREEN}http://$INGRESS_HOST${NC}"
+    echo "  For Rancher Desktop, use port-forward to access the application:"
+    echo ""
+    echo "  Run this command in a separate terminal:"
+    echo -e "  ${GREEN}kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 8080:80${NC}"
+    echo ""
+    echo "  Then access the API at: http://localhost:8080"
     echo ""
     
-    print_info "Test endpoints:"
-    echo -e "  ${YELLOW}Health Check:${NC}      curl http://$INGRESS_HOST/health"
-    echo -e "  ${YELLOW}API Info:${NC}          curl http://$INGRESS_HOST/"
-    echo -e "  ${YELLOW}Echo Test:${NC}         curl -X POST http://$INGRESS_HOST/echo -H 'Content-Type: application/json' -d '{\"test\":\"hello\"}'"
-    echo -e "  ${YELLOW}Get Messages:${NC}      curl http://$INGRESS_HOST/messages"
-    echo -e "  ${YELLOW}Create Message:${NC}    curl -X POST http://$INGRESS_HOST/messages -H 'Content-Type: application/json' -d '{\"text\":\"Hello from K8s!\",\"author\":\"Demo\"}'"
+    print_info "Test endpoints (using port-forward on port 8080):"
+    echo -e "  ${YELLOW}Health Check:${NC}      curl http://localhost:8080/health -H 'Host: api.local'"
+    echo -e "  ${YELLOW}API Info:${NC}          curl http://localhost:8080/ -H 'Host: api.local'"
+    echo -e "  ${YELLOW}Echo Test:${NC}         curl -X POST http://localhost:8080/echo -H 'Host: api.local' -H 'Content-Type: application/json' -d '{\"test\":\"hello\"}'"
+    echo -e "  ${YELLOW}Get Messages:${NC}      curl http://localhost:8080/messages -H 'Host: api.local'"
+    echo -e "  ${YELLOW}Create Message:${NC}    curl -X POST http://localhost:8080/messages -H 'Host: api.local' -H 'Content-Type: application/json' -d '{\"text\":\"Hello from K8s!\",\"author\":\"Demo\"}'"
+    echo ""
+    
+    print_info "Alternative: Direct service access via port-forward:"
+    echo "  kubectl port-forward -n demo-app svc/api 8081:80"
+    echo "  curl http://localhost:8081/health"
     echo ""
     
     print_info "Kubernetes Resources:"
