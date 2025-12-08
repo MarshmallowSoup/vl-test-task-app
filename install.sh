@@ -61,29 +61,6 @@ check_cluster() {
     kubectl cluster-info | head -1
 }
 
-# Verify API image exists
-verify_api_image() {
-    print_info "Verifying API Docker image exists..."
-    
-    # Check with nerdctl first (Rancher Desktop)
-    if command -v nerdctl &> /dev/null; then
-        if nerdctl -n k8s.io images | grep -q "$API_IMAGE_NAME"; then
-            print_success "API image found (nerdctl)"
-            return 0
-        fi
-    fi
-    
-    # Check with docker
-    if command -v docker &> /dev/null; then
-        if docker images | grep -q "k8s-api-demo"; then
-            print_success "API image found (docker)"
-            return 0
-        fi
-    fi
-    
-    print_warning "API image '$API_IMAGE_NAME' not found locally"
-    print_info "Assuming image will be pulled or is available in the cluster"
-}
 
 # Verify NGINX Ingress Controller exists
 verify_nginx_ingress() {
@@ -97,7 +74,8 @@ verify_nginx_ingress() {
         fi
     else
         print_warning "NGINX Ingress Controller not found - please install it manually"
-        print_info "Run: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.5/deploy/static/provider/cloud/deploy.yaml"
+        print_info "Running: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.5/deploy/static/provider/cloud/deploy.yaml"
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.5/deploy/static/provider/cloud/deploy.yaml
     fi
 }
 
@@ -187,8 +165,51 @@ deploy_api() {
 # Deploy Ingress
 deploy_ingress() {
     print_info "Deploying Ingress..."
-    kubectl apply -f k8s/ingress.yaml
-    print_success "Ingress deployed"
+    
+    # Wait for the admission webhook to be ready
+    print_info "Waiting for NGINX Ingress admission webhook to be ready..."
+    local max_attempts=30
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if kubectl wait --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=10s &> /dev/null; then
+            
+            # Give the webhook a few more seconds to fully initialize
+            sleep 5
+            
+            # Try to apply the ingress
+            if kubectl apply -f k8s/ingress.yaml 2>&1 | tee /tmp/ingress-apply.log; then
+                if ! grep -q "error when creating" /tmp/ingress-apply.log; then
+                    print_success "Ingress deployed"
+                    rm -f /tmp/ingress-apply.log
+                    return 0
+                fi
+            fi
+        fi
+        
+        print_info "Admission webhook not ready yet, waiting... (attempt $attempt/$max_attempts)"
+        sleep 5
+        ((attempt++))
+    done
+    
+    print_warning "Could not deploy Ingress with validation webhook"
+    print_info "Trying to delete the validating webhook and deploy again..."
+    
+    # Delete the validating webhook configuration and try again
+    kubectl delete validatingwebhookconfiguration ingress-nginx-admission --ignore-not-found=true
+    sleep 2
+    
+    if kubectl apply -f k8s/ingress.yaml; then
+        print_success "Ingress deployed (without validation webhook)"
+    else
+        print_error "Failed to deploy Ingress"
+        return 1
+    fi
+    
+    rm -f /tmp/ingress-apply.log
 }
 
 # Configure /etc/hosts
@@ -266,7 +287,6 @@ main() {
     # Preflight checks
     check_kubectl
     check_cluster
-    verify_api_image
     verify_nginx_ingress
     
     # Deploy

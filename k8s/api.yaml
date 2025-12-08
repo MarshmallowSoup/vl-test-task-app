@@ -16,7 +16,7 @@ spec:
         app: api
     spec:
       imagePullSecrets:
-        - name: regcred
+        - name: docker-registry-secret
       containers:
       - name: api
         image: lysetskyiv/microapp:api-v1.4
